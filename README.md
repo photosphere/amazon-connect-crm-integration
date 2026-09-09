@@ -10,7 +10,22 @@
 两个页面共用同一份演示数据与 localStorage 配置，可以来回切换而不用重填 CCP 地址。
 
 - SDK：[amazon-connect-streams](https://github.com/amazon-connect/amazon-connect-streams) `2.18.5`（jsDelivr CDN 引入）
-- 参考实现思路来自 `photosphere/connect-ccp-custom-agent-voice · CallDemo.html`
+
+---
+#### Login
+<img width="1509" height="770" alt="Image" src="https://github.com/user-attachments/assets/6da577e0-d917-4279-984b-dcb58bb47e51" />
+
+#### Inbound Call in Native CCP
+<img width="1509" height="850" alt="Image" src="https://github.com/user-attachments/assets/5a12cb3c-b494-4f36-b257-6b31a3ee1023" />
+
+#### Click-to-Call Outbound Call in Native CCP
+<img width="1511" height="853" alt="Image" src="https://github.com/user-attachments/assets/a33d6345-6573-4062-8955-ac810c937560" />
+
+#### Inbound Call in Customized CCP
+<img width="1508" height="846" alt="Image" src="https://github.com/user-attachments/assets/6ac445b8-fb6f-4ed3-ad52-d3d1ed46f6a4" />
+
+#### Click-to-Call Outbound Call in Customized CCP
+<img width="1505" height="847" alt="Image" src="https://github.com/user-attachments/assets/11ff53a2-b542-4b66-8a92-0e6c46a31e43" />
 
 ---
 
@@ -166,7 +181,7 @@
 - CRM 数据是内置的假数据 + localStorage，不接任何后端；清缓存即丢。
 - 所有演示客户共用同一个外呼号码，因此按号码反查客户时只能做"稳定兜底"选择，真实场景应按号码唯一匹配或用联系属性透传 `customerId`。
 - 转接、拨号盘、Chat 消息收发、录音回放没有自建 UI，统一交给完整 CCP。
-- `index_pro.html` 的通话控制已带 try/catch 和 success/failure 回调兜底，但只在桩替换的 Streams 环境下验证过完整状态机（振铃 → 接听 → 保持 → 静音 → ACW），**尚未在真实 Connect 实例上跑过真实通话**，上线前请实拨一通确认。
+- `index_pro.html` 的通话控制已带 try/catch 和 success/failure 回调兜底，验证过完整状态机（振铃 → 接听 → 保持 → 静音 → ACW）。
 - `index.html` 在视口宽度小于 1280px 时退回悬浮面板，此时仍会覆盖内容（与改造前一致）。
 - 同一浏览器只应有一个页签初始化 CCP；`index.html` 与 `index_pro.html` 不要同时打开。
 
