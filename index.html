@@ -1,0 +1,1499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Amazon CRM · Amazon Connect CCP Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/amazon-connect-streams@2.18.5/release/connect-streams.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff', 100: '#e0e7ff', 200: '#c7d2fe',
+              500: '#6366f1', 600: '#4f46e5', 700: '#4338ca'
+            },
+            ink: { 900: '#0f172a', 700: '#334155', 500: '#64748b', 400: '#94a3b8' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+
+    /* ---------- CCP floating panel ---------- */
+    :root { --ccp-w: 400px; --ccp-gap: 24px; }
+
+    #ccpPanel {
+      position: fixed; right: var(--ccp-gap); bottom: 96px; width: var(--ccp-w); z-index: 60;
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    /* NOTE: the CCP iframe must stay mounted in the DOM at all times, otherwise
+       connect.core.initCCP is torn down. We only hide it visually, and we never
+       re-parent #ccpMount (that would reload the iframe). Docking therefore works
+       by reserving space in the layout, not by moving the panel into the grid. */
+    #ccpPanel.ccp-collapsed {
+      opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(12px) scale(.98);
+    }
+    #ccpShell { display: flex; flex-direction: column; max-height: 100%; }
+    #ccpMount { height: 600px; }
+    #ccpMount iframe { width: 100% !important; height: 100% !important; border: 0; display: block; }
+
+    /* ---------- docked mode: right rail + content makes room ---------- */
+    body.ccp-docked #ccpPanel {
+      top: 80px; bottom: var(--ccp-gap); left: auto; right: var(--ccp-gap);
+    }
+    body.ccp-docked #ccpShell { height: 100%; }
+    body.ccp-docked #ccpMount { height: auto; flex: 1 1 auto; min-height: 320px; }
+    /* higher specificity than Tailwind's .mx-auto so the grid actually reflows */
+    body.ccp-docked main { margin-right: calc(var(--ccp-w) + var(--ccp-gap) * 2); }
+    body.ccp-docked #toastWrap { right: calc(var(--ccp-w) + var(--ccp-gap) * 2); }
+    /* while docked the panel is always on screen, so the launcher would just
+       cover the ticket form */
+    body.ccp-docked #ccpFab { display: none; }
+    /* On a laptop-sized screen the reserved rail leaves too little room for the
+       ticket / history side-by-side split, so stack them while docked. */
+    @media (max-width: 1700px) {
+      body.ccp-docked .detail-split { grid-template-columns: minmax(0, 1fr); }
+    }
+
+    main { transition: margin-right .2s ease; }
+
+    #ccpFab { position: fixed; right: 24px; bottom: 24px; z-index: 61; }
+    .fab-ring::after {
+      content: ''; position: absolute; inset: 0; border-radius: 9999px;
+      animation: ring 1.4s cubic-bezier(.215,.61,.355,1) infinite;
+    }
+    @keyframes ring {
+      0%   { box-shadow: 0 0 0 0 rgba(16,185,129,.55); }
+      70%  { box-shadow: 0 0 0 16px rgba(16,185,129,0); }
+      100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
+    }
+    .pop-in { animation: popIn .28s ease both; }
+    @keyframes popIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+    .timeline::before {
+      content: ''; position: absolute; left: 15px; top: 6px; bottom: 6px; width: 2px; background: #e2e8f0;
+    }
+    .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+    .scroll-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; }
+    .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+
+    .cust-row.selected { background: #eef2ff; border-color: #c7d2fe; }
+    .drag-handle { cursor: grab; }
+    .drag-handle:active { cursor: grabbing; }
+  </style>
+</head>
+
+<body class="bg-slate-100 text-ink-900">
+
+  <!-- ============================================================
+       1) LOGIN GATE — CRM is blocked until the agent logs into CCP
+       ============================================================ -->
+  <div id="loginGate" class="fixed inset-0 z-[100] bg-slate-900/70 backdrop-blur-sm flex items-center justify-center px-4">
+    <div class="w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden">
+      <div class="bg-gradient-to-r from-brand-600 to-violet-500 px-6 py-5">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
+            <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+          </div>
+          <div>
+            <h1 class="text-white text-lg font-semibold">Amazon CRM</h1>
+            <p class="text-white/80 text-xs">请先登录 Amazon Connect CCP 后使用 CRM</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="px-6 py-5 space-y-4">
+        <div>
+          <label for="cfgInstanceUrl" class="block text-xs font-medium text-ink-500 mb-1.5">CCP 地址 (ccpUrl)</label>
+          <input id="cfgInstanceUrl" type="text" spellcheck="false"
+            class="w-full text-sm border border-slate-200 rounded-lg px-3 py-2.5 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+            placeholder="https://your-instance.my.connect.aws/ccp-v2/" />
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label for="cfgRegion" class="block text-xs font-medium text-ink-500 mb-1.5">区域 (region)</label>
+            <input id="cfgRegion" type="text" spellcheck="false"
+              class="w-full text-sm border border-slate-200 rounded-lg px-3 py-2.5 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+              placeholder="us-west-2" />
+          </div>
+          <div>
+            <label for="cfgLoginUrl" class="block text-xs font-medium text-ink-500 mb-1.5">登录地址 (可选)</label>
+            <input id="cfgLoginUrl" type="text" spellcheck="false"
+              class="w-full text-sm border border-slate-200 rounded-lg px-3 py-2.5 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+              placeholder="留空则使用默认" />
+          </div>
+        </div>
+
+        <div>
+          <label for="cfgOutboundNumber" class="block text-xs font-medium text-ink-500 mb-1.5">外呼号码 (outbound number)</label>
+          <input id="cfgOutboundNumber" type="tel" spellcheck="false" autocomplete="off"
+            class="w-full text-sm border border-slate-200 rounded-lg px-3 py-2.5 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+            placeholder="+13072633584" />
+          <p class="mt-1 text-[11px] text-ink-400">客户目录中“点击外呼”使用的号码，可修改（E.164 格式，例如 +13072633584）。</p>
+        </div>
+
+        <div id="gateStatus" class="hidden rounded-lg bg-brand-50 border border-brand-100 px-3 py-2.5 text-xs text-brand-700 flex items-center gap-2">
+          <svg class="w-4 h-4 animate-spin shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          <span id="gateStatusText">正在初始化 CCP，请在弹出的窗口中完成登录…</span>
+        </div>
+
+        <div class="flex gap-2">
+          <button id="gateLoginBtn" onclick="startCcp()"
+            class="flex-1 bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium px-4 py-2.5 rounded-lg transition">
+            登录 CCP
+          </button>
+          <button onclick="resetCcpSession()" title="清理登录状态并重新初始化"
+            class="px-4 py-2.5 rounded-lg text-sm text-ink-500 border border-slate-200 hover:bg-slate-50 transition">
+            重置
+          </button>
+        </div>
+
+        <p class="text-[11px] leading-relaxed text-ink-400">
+          提示：请把本页所在的源（例如 <code class="bg-slate-100 px-1 rounded">http://localhost:8080</code>）加入 Connect 实例的
+          <b>Approved origins</b>，并允许浏览器弹窗。登录成功后本弹窗会自动关闭。
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       TOP BAR
+       ============================================================ -->
+  <header class="sticky top-0 z-40 bg-white border-b border-slate-200">
+    <div class="max-w-[1500px] mx-auto px-5 h-16 flex items-center gap-4">
+      <div class="flex items-center gap-2.5 shrink-0">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-600 to-violet-500 flex items-center justify-center">
+          <span class="text-white font-bold text-sm">A</span>
+        </div>
+        <div class="leading-tight">
+          <div class="font-semibold text-sm">Amazon CRM</div>
+          <div class="text-[11px] text-ink-400">客户与工单管理</div>
+        </div>
+      </div>
+
+      <div class="flex-1 max-w-md relative">
+        <svg class="w-4 h-4 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        <label for="searchInput" class="sr-only">按客户姓名检索</label>
+        <input id="searchInput" type="search" oninput="renderCustomerList()" placeholder="按客户姓名检索（也支持编号 / 手机 / 邮箱）"
+          class="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 py-2.5 outline-none focus:bg-white focus:border-brand-500 focus:ring-2 focus:ring-brand-100" />
+      </div>
+
+      <div class="ml-auto flex items-center gap-3">
+        <div class="hidden md:flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+          <span id="agentDot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+          <label for="agentStateSelect" class="sr-only">座席状态</label>
+          <select id="agentStateSelect" onchange="onAgentStateChange()" disabled
+            class="bg-transparent text-xs text-ink-700 outline-none max-w-[130px] disabled:text-ink-400">
+            <option>未登录</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-2">
+          <div class="w-9 h-9 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-xs font-semibold" id="agentAvatar">--</div>
+          <div class="hidden sm:block leading-tight">
+            <div class="text-xs font-medium" id="agentName">未登录座席</div>
+            <div class="text-[11px] text-ink-400" id="agentRouting">-</div>
+          </div>
+        </div>
+
+        <button id="logoutBtn" onclick="logoutAgent()" title="座席退出登录"
+          class="hidden items-center gap-1.5 text-xs text-rose-600 border border-rose-200 bg-rose-50 hover:bg-rose-100 rounded-xl px-3 py-2.5 transition">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+          <span class="hidden sm:inline">退出登录</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============================================================
+       MAIN LAYOUT
+       ============================================================ -->
+  <main class="max-w-[1500px] mx-auto px-5 py-5 grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-5 items-start">
+
+    <!-- ---------- Customer directory ---------- -->
+    <section class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+        <div>
+          <h2 class="text-sm font-semibold">客户目录</h2>
+          <p class="text-[11px] text-ink-400"><span id="custCount">0</span> 位客户 · 点击号码即可外呼</p>
+        </div>
+        <button onclick="simulateMenu()" class="text-[11px] text-brand-600 hover:text-brand-700 border border-brand-100 bg-brand-50 rounded-lg px-2.5 py-1.5">
+          模拟进线
+        </button>
+      </div>
+      <div id="customerList" class="max-h-[calc(100vh-220px)] overflow-y-auto scroll-thin divide-y divide-slate-50"></div>
+      <div id="emptyList" class="hidden px-4 py-10 text-center text-xs text-ink-400">没有匹配的客户</div>
+    </section>
+
+    <!-- ---------- Detail ---------- -->
+    <section class="space-y-5">
+
+      <!-- Screen pop banner -->
+      <div id="screenPop" class="hidden pop-in rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-emerald-500 text-white flex items-center justify-center shrink-0">
+          <svg id="screenPopIcon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+        </div>
+        <div class="min-w-0">
+          <div class="text-sm font-semibold text-emerald-800" id="screenPopTitle">来电弹屏</div>
+          <div class="text-[11px] text-emerald-700 truncate" id="screenPopSub">-</div>
+        </div>
+        <div class="ml-auto flex items-center gap-2">
+          <span id="screenPopTimer" class="text-xs font-mono text-emerald-800 bg-white/70 rounded-lg px-2.5 py-1">00:00</span>
+          <button onclick="openCcp()" class="text-xs bg-white text-emerald-700 border border-emerald-200 rounded-lg px-2.5 py-1.5 hover:bg-emerald-100">打开 CCP</button>
+        </div>
+      </div>
+
+      <!-- Customer profile -->
+      <div id="profileCard" class="bg-white rounded-2xl border border-slate-200 p-5">
+        <div class="text-sm text-ink-400">从左侧选择一位客户，或等待来电 / Chat 进线自动弹屏。</div>
+      </div>
+
+      <div class="detail-split grid grid-cols-1 xl:grid-cols-2 gap-5 items-start">
+        <!-- Ticket -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+            <h2 class="text-sm font-semibold">当前工单</h2>
+            <button onclick="createManualTicket()" class="text-[11px] text-brand-600 hover:text-brand-700 border border-brand-100 bg-brand-50 rounded-lg px-2.5 py-1.5">新建工单</button>
+          </div>
+          <div id="ticketPane" class="p-4"></div>
+        </div>
+
+        <!-- History -->
+        <div class="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div class="px-4 py-3 border-b border-slate-100">
+            <h2 class="text-sm font-semibold">历史来往记录</h2>
+            <p class="text-[11px] text-ink-400">通话 / Chat / 邮件 / 工单 时间线</p>
+          </div>
+          <div id="historyPane" class="p-4 max-h-[520px] overflow-y-auto scroll-thin"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============================================================
+       CCP FLOATING PANEL  (iframe stays mounted, only hidden)
+       ============================================================ -->
+  <div id="ccpPanel" class="ccp-collapsed">
+    <div id="ccpShell" class="bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
+      <div id="ccpHeader" class="drag-handle bg-gradient-to-r from-brand-600 to-violet-500 px-4 py-2.5 flex items-center gap-2 select-none">
+        <svg class="w-4 h-4 text-white/80" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8h16M4 8a2 2 0 01-2-2V5a2 2 0 012-2h16a2 2 0 012 2v1a2 2 0 01-2 2M6 12h.01M6 16h.01M10 12h.01M10 16h.01M14 12h.01M14 16h.01M18 12h.01M18 16h.01"/></svg>
+        <span class="text-white text-sm font-medium">Amazon Connect CCP</span>
+        <span id="ccpContactBadge" class="hidden text-[10px] bg-white/25 text-white rounded-full px-2 py-0.5"></span>
+        <button id="ccpDockBtn" onclick="toggleCcpDock()" aria-label="停靠 / 悬浮"
+          class="ml-auto shrink-0 rounded-lg p-1 text-white/80 hover:text-white hover:bg-white/20 transition">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm10-2v18"/></svg>
+        </button>
+        <button onclick="closeCcp()" aria-label="收起 CCP" class="shrink-0 text-white/80 hover:text-white">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        </button>
+      </div>
+      <!-- connect.core.initCCP target -->
+      <div id="ccpMount"></div>
+    </div>
+  </div>
+
+  <!-- CCP launcher icon -->
+  <button id="ccpFab" onclick="toggleCcp()" aria-label="打开 / 收起 CCP" title="CCP"
+    class="hidden relative w-14 h-14 rounded-full bg-brand-600 hover:bg-brand-700 shadow-xl flex items-center justify-center transition">
+    <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636a9 9 0 010 12.728M15.536 8.464a5 5 0 010 7.072M5 9v6a1 1 0 001 1h2l4 4V4L8 8H6a1 1 0 00-1 1z"/></svg>
+    <span id="fabBadge" class="hidden absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-rose-500 text-white text-[11px] font-semibold flex items-center justify-center border-2 border-white"></span>
+  </button>
+
+  <!-- Toasts -->
+  <div id="toastWrap" class="fixed top-20 right-5 z-[90] space-y-2 w-72"></div>
+
+  <!-- Debug log -->
+  <div class="fixed left-4 bottom-4 z-50">
+    <button onclick="toggleLog()" class="text-[11px] bg-white border border-slate-200 text-ink-500 rounded-lg px-2.5 py-1.5 shadow">
+      事件日志
+    </button>
+    <div id="logBox" class="hidden mt-2 w-[420px] bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden">
+      <div class="px-3 py-2 border-b border-slate-100 flex items-center">
+        <span class="text-xs font-medium">CCP 事件日志</span>
+        <button onclick="document.getElementById('logText').value=''" class="ml-auto text-[11px] text-ink-400 hover:text-ink-700">清空</button>
+      </div>
+      <textarea id="logText" readonly rows="12"
+        class="w-full text-[11px] font-mono p-3 outline-none resize-none text-ink-700"></textarea>
+    </div>
+  </div>
+
+  <script>
+  /* ==========================================================================
+     Amazon CRM — dummy CRM with Amazon Connect CCP (amazon-connect-streams)
+     Reference: photosphere/connect-ccp-custom-agent-voice · CallDemo.html
+     ========================================================================== */
+
+  // Every dummy customer shares the same outbound number so click-to-call is
+  // easy to test. It is editable on the login gate (cfg.outboundNumber).
+  const DEFAULT_OUTBOUND_NUMBER = '+13072633584';
+
+  // Bumped to v2 so a config saved with the old defaults doesn't shadow the new ones.
+  const CFG_KEY = 'auroraCrm.ccpConfig.v2';
+  const DATA_KEY = 'auroraCrm.data.v1';
+  const DOCK_KEY = 'auroraCrm.ccpDocked';
+
+  // Below this viewport width there is no room for a third column, so the CCP
+  // goes back to being a floating panel.
+  const CCP_DOCK_MIN_WIDTH = 1280;
+
+  const DEFAULT_CFG = {
+    ccpUrl: 'https://connect-us.my.connect.aws/ccp-v2/',
+    region: 'us-west-2',
+    loginUrl: '',
+    outboundNumber: DEFAULT_OUTBOUND_NUMBER
+  };
+
+  /** The number used for every click-to-call, read live from the saved config. */
+  function outboundNumber() {
+    const n = state && state.cfg && state.cfg.outboundNumber;
+    return (n && String(n).trim()) || DEFAULT_OUTBOUND_NUMBER;
+  }
+
+  /* ------------------------------ dummy data ------------------------------ */
+
+  const CUSTOMERS = [
+    mk('C-10001', '张伟',   '男', 'VIP',  '上海市浦东新区世纪大道 100 号', '上海', 'zhang.wei@example.com',  '星辰科技', 'Aurora Pro 年费版',  '2021-03-14', 1280.5),
+    mk('C-10002', '李娜',   '女', '黄金', '北京市朝阳区建国路 88 号',      '北京', 'li.na@example.com',      '云图传媒', 'Aurora 标准版',      '2022-07-02', 320.0),
+    mk('C-10003', '王强',   '男', '普通', '广州市天河区天河路 208 号',     '广州', 'wang.qiang@example.com', '南方物流', 'Aurora Lite',        '2023-01-19', 0),
+    mk('C-10004', '刘洋',   '男', '白银', '深圳市南山区科技园南路 6 号',   '深圳', 'liu.yang@example.com',   '深蓝智造', 'Aurora 标准版',      '2020-11-05', 76.4),
+    mk('C-10005', '陈静',   '女', 'VIP',  '杭州市西湖区文三路 22 号',      '杭州', 'chen.jing@example.com',  '钱塘电商', 'Aurora Pro 月付版',  '2019-06-28', 2450.0),
+    mk('C-10006', '赵敏',   '女', '黄金', '成都市高新区天府三街 199 号',   '成都', 'zhao.min@example.com',   '蜀道文旅', 'Aurora 标准版',      '2022-02-11', 512.8),
+    mk('C-10007', '孙浩',   '男', '普通', '武汉市洪山区光谷大道 77 号',    '武汉', 'sun.hao@example.com',    '江城教育', 'Aurora Lite',        '2023-09-30', 15.0),
+    mk('C-10008', '周雅',   '女', '白银', '南京市鼓楼区中山北路 45 号',    '南京', 'zhou.ya@example.com',    '金陵健康', 'Aurora 标准版',      '2021-12-08', 188.6),
+    mk('C-10009', '吴磊',   '男', 'VIP',  '西安市雁塔区高新四路 12 号',    '西安', 'wu.lei@example.com',     '长安半导体', 'Aurora Pro 年费版', '2018-04-22', 3120.0),
+    mk('C-10010', '郑爽',   '女', '普通', '重庆市渝北区龙溪街道 3 号',     '重庆', 'zheng.shuang@example.com','山城零售','Aurora Lite',       '2024-03-05', 42.2),
+    mk('C-10011', 'Emily Carter', '女', '黄金', '1200 Market St, Seattle WA', 'Seattle', 'emily.carter@example.com', 'Northwind Retail', 'Aurora Standard', '2022-05-17', 640.0),
+    mk('C-10012', 'Daniel Kim',   '男', 'VIP',  '88 King St, Sydney NSW',     'Sydney',  'daniel.kim@example.com',   'Harbour Logistics', 'Aurora Pro Annual', '2020-08-09', 1975.3)
+  ];
+
+  function mk(id, name, gender, tier, address, city, email, company, product, since, balance) {
+    return {
+      id, name, gender, tier, address, city, email, company, product, since, balance,
+      // Lazy getter so editing the outbound number on the login gate is picked up
+      // everywhere (list, profile, click-to-call) without rebuilding the records.
+      get phone() { return outboundNumber(); }
+    };
+  }
+
+  // Seed interaction history (dummy)
+  const SEED_HISTORY = {
+    'C-10001': [
+      h('VOICE', '2026-08-28 10:12', '账单金额疑问',   '客户对 8 月账单中的超量费用有疑问，已解释计费规则并发送明细。', '李坐席', '通话 06:32', '已解决'),
+      h('CHAT',  '2026-08-14 15:40', '升级套餐咨询',   '咨询 Pro 年费版权益，已发送对比表，客户表示考虑中。',           '王坐席', 'Chat 12 轮', '待跟进'),
+      h('EMAIL', '2026-07-30 09:05', '发票重开申请',   '客户申请重开 7 月发票，财务已于次日处理。',                     '系统',   '-',          '已解决')
+    ],
+    'C-10002': [
+      h('VOICE', '2026-09-01 14:20', '登录异常',       '客户无法登录控制台，指导清理缓存后恢复。',                     '张坐席', '通话 04:11', '已解决'),
+      h('TICKET','2026-06-18 11:00', '数据导出需求',   '需求已转产品团队评估。',                                       '刘坐席', '-',          '进行中')
+    ],
+    'C-10003': [
+      h('CHAT',  '2026-08-25 11:22', '发票地址变更',   '客户更新开票地址，已同步至财务系统。',                         '周坐席', 'Chat 5 轮',  '已解决'),
+      h('VOICE', '2026-04-02 17:10', '套餐降级咨询',   '客户咨询降级为 Lite 的影响，已说明功能差异。',                 '李坐席', '通话 05:48', '已解决')
+    ],
+    'C-10004': [
+      h('VOICE', '2026-08-19 09:41', '设备无法激活',   '排查后确认序列号录入错误，重新绑定成功。',                     '孙坐席', '通话 09:03', '已解决'),
+      h('TICKET','2026-08-19 10:05', '备件更换申请',   '已寄出替换配件，物流单号 SF1234567890。',                      '孙坐席', '-',          '已解决'),
+      h('EMAIL', '2026-03-11 14:00', '年度对账单',     '系统自动发送 2025 年度对账单。',                               '系统',   '-',          '已解决')
+    ],
+    'C-10006': [
+      h('CHAT',  '2026-09-04 10:05', '优惠券无法使用', '优惠券已过期，已补发同额度新券。',                             '郑坐席', 'Chat 8 轮',  '已解决'),
+      h('VOICE', '2026-07-16 15:32', '账号安全告警',   '客户收到异地登录提醒，已协助重置密码并开启 MFA。',             '吴坐席', '通话 07:19', '已解决')
+    ],
+    'C-10007': [
+      h('VOICE', '2026-08-08 13:27', '试用延期申请',   '客户申请延长试用 14 天，已审批通过。',                         '陈坐席', '通话 03:55', '已解决')
+    ],
+    'C-10008': [
+      h('VOICE', '2026-08-31 11:14', '报表数据不一致', '与数据团队核对后确认为时区差异，已解释。',                     '刘坐席', '通话 13:41', '已解决'),
+      h('CHAT',  '2026-07-05 16:20', '新增子账号',     '已指导客户在控制台创建 3 个子账号。',                          '张坐席', 'Chat 11 轮', '已解决'),
+      h('TICKET','2026-02-27 09:30', '合同续签',       '销售跟进中。',                                                 '销售组', '-',          '待跟进')
+    ],
+    'C-10010': [
+      h('CHAT',  '2026-09-05 09:48', '如何绑定发票主体', '已发送操作指引链接。',                                       '赵坐席', 'Chat 4 轮',  '已解决'),
+      h('VOICE', '2026-06-01 10:02', '首次开通指导',   '协助客户完成初始配置。',                                       '周坐席', '通话 15:22', '已解决')
+    ],
+    'C-10012': [
+      h('VOICE', '2026-08-27 08:30', 'Bulk import failed', 'CSV encoding issue; provided a corrected template.',       'Agent K', '通话 08:12', '已解决'),
+      h('EMAIL', '2026-08-27 09:15', 'Import template',    'Sent UTF-8 template and mapping guide.',                   '系统',    '-',          '已解决')
+    ],
+    'C-10005': [
+      h('VOICE', '2026-09-03 16:48', '投诉：配送延迟', '客户投诉两笔订单延迟，已升级至物流团队并补偿优惠券。',         '赵坐席', '通话 11:27', '已升级'),
+      h('CHAT',  '2026-08-21 10:33', '退款进度查询',   '告知退款 T+3 到账。',                                          '孙坐席', 'Chat 6 轮',  '已解决'),
+      h('VOICE', '2026-05-09 09:15', '续费提醒',       '外呼提醒续费，客户当场完成支付。',                             '陈坐席', '通话 03:02', '已解决')
+    ],
+    'C-10009': [
+      h('VOICE', '2026-08-30 13:05', '技术故障：API 超时', 'API 网关超时，已提交 P2 工单，工程团队 2 小时内恢复。',    '吴坐席', '通话 18:44', '已解决'),
+      h('EMAIL', '2026-08-30 15:20', '故障复盘报告',   '已发送 RCA 报告。',                                            '系统',   '-',          '已解决')
+    ],
+    'C-10011': [
+      h('CHAT',  '2026-09-02 08:12', 'Invoice question', 'Explained proration on the September invoice.',              'Agent M', 'Chat 9 turns', '已解决')
+    ]
+  };
+
+  function h(channel, at, subject, summary, agent, meta, status) {
+    return { channel, at, subject, summary, agent, meta, status, seeded: true };
+  }
+
+  /* ------------------------------ app state ------------------------------ */
+
+  const state = {
+    cfg: loadCfg(),
+    ccpInitialized: false,
+    agent: null,
+    agentStates: [],
+    selectedId: null,
+    activeContacts: {},        // contactId -> { type, customerId, ticketId, startedAt }
+    pendingOutbound: null,     // customerId for a click-to-call we just placed
+    ticketSeq: 0,
+    ccpDocked: localStorage.getItem(DOCK_KEY) !== '0',   // dock to the right rail by default
+    store: loadStore(),        // { tickets: [], history: { custId: [entries] } }
+    popTimer: null,
+    popStart: 0
+  };
+
+  function loadCfg() {
+    try {
+      const raw = localStorage.getItem(CFG_KEY);
+      if (raw) return Object.assign({}, DEFAULT_CFG, JSON.parse(raw));
+    } catch (e) { /* ignore */ }
+    return Object.assign({}, DEFAULT_CFG);
+  }
+  function saveCfg(cfg) { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); }
+
+  function loadStore() {
+    try {
+      const raw = localStorage.getItem(DATA_KEY);
+      if (raw) {
+        const p = JSON.parse(raw);
+        return { tickets: p.tickets || [], history: p.history || {} };
+      }
+    } catch (e) { /* ignore */ }
+    return { tickets: [], history: {} };
+  }
+  function saveStore() { localStorage.setItem(DATA_KEY, JSON.stringify(state.store)); }
+
+  /* ------------------------------ helpers ------------------------------ */
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+  function log(msg) {
+    const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const box = $('logText');
+    box.value += `[${t}] ${typeof msg === 'string' ? msg : JSON.stringify(msg)}\n`;
+    box.scrollTop = box.scrollHeight;
+  }
+  function toggleLog() { $('logBox').classList.toggle('hidden'); }
+
+  function toast(msg, kind) {
+    const colors = {
+      ok:   'bg-emerald-50 border-emerald-200 text-emerald-800',
+      err:  'bg-rose-50 border-rose-200 text-rose-800',
+      info: 'bg-white border-slate-200 text-ink-700'
+    };
+    const el = document.createElement('div');
+    el.className = `pop-in border rounded-xl px-3.5 py-2.5 text-xs shadow-lg ${colors[kind] || colors.info}`;
+    el.textContent = msg;
+    $('toastWrap').appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 320); }, 3600);
+  }
+
+  function fmtPhone(p) {
+    const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(p || '');
+    return m ? `+1 ${m[1]}-${m[2]}-${m[3]}` : (p || '-');
+  }
+  function nowStr(d) {
+    d = d || new Date();
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function initials(name) {
+    if (/[a-zA-Z]/.test(name)) return name.split(/\s+/).map(x => x[0]).join('').slice(0, 2).toUpperCase();
+    return name.slice(0, 1);
+  }
+  function tierStyle(t) {
+    return ({
+      'VIP':  'bg-amber-100 text-amber-700 border-amber-200',
+      '黄金': 'bg-yellow-100 text-yellow-700 border-yellow-200',
+      '白银': 'bg-slate-100 text-slate-600 border-slate-200',
+      '普通': 'bg-slate-50 text-ink-500 border-slate-200'
+    })[t] || 'bg-slate-50 text-ink-500 border-slate-200';
+  }
+  function channelMeta(ch) {
+    return ({
+      VOICE:  { label: '通话',  cls: 'bg-emerald-100 text-emerald-700' },
+      CHAT:   { label: 'Chat',  cls: 'bg-sky-100 text-sky-700' },
+      EMAIL:  { label: '邮件',  cls: 'bg-violet-100 text-violet-700' },
+      TICKET: { label: '工单',  cls: 'bg-amber-100 text-amber-700' },
+      TASK:   { label: '任务',  cls: 'bg-slate-100 text-slate-600' }
+    })[ch] || { label: ch, cls: 'bg-slate-100 text-slate-600' };
+  }
+  function customerById(id) { return CUSTOMERS.find(c => c.id === id); }
+
+  /* ==========================================================================
+     1) CCP LOGIN
+     ========================================================================== */
+
+  /**
+   * Geometry for a popup centered on the screen the browser window sits on.
+   * Streams passes width / height / top / left straight to window.open.
+   */
+  function centeredPopupBox(width, height) {
+    const sw = window.screen.availWidth  || window.screen.width  || width;
+    const sh = window.screen.availHeight || window.screen.height || height;
+    const sx = (window.screen.availLeft != null ? window.screen.availLeft : (window.screenLeft || window.screenX || 0));
+    const sy = (window.screen.availTop  != null ? window.screen.availTop  : (window.screenTop  || window.screenY || 0));
+    const w = Math.min(width, sw);
+    const h = Math.min(height, sh);
+    return {
+      width: w,
+      height: h,
+      left: Math.max(0, Math.round(sx + (sw - w) / 2)),
+      top:  Math.max(0, Math.round(sy + (sh - h) / 2))
+    };
+  }
+
+  function startCcp() {
+    const cfg = {
+      ccpUrl: $('cfgInstanceUrl').value.trim(),
+      region: $('cfgRegion').value.trim(),
+      loginUrl: $('cfgLoginUrl').value.trim(),
+      outboundNumber: $('cfgOutboundNumber').value.trim() || DEFAULT_OUTBOUND_NUMBER
+    };
+    if (!/^https:\/\/.+/.test(cfg.ccpUrl)) { toast('请填写有效的 CCP 地址 (https://...)', 'err'); return; }
+    if (!cfg.region) { toast('请填写区域，例如 us-east-1', 'err'); return; }
+    if (!/^\+[1-9]\d{6,14}$/.test(cfg.outboundNumber)) {
+      toast('外呼号码需为 E.164 格式，例如 +13072633584', 'err'); return;
+    }
+    state.cfg = cfg;
+    saveCfg(cfg);
+    $('cfgOutboundNumber').value = cfg.outboundNumber;
+    renderCustomerList();
+    if (state.selectedId) selectCustomer(state.selectedId);
+    initCcp();
+  }
+
+  function initCcp() {
+    if (state.ccpInitialized) {
+      toast('CCP 已初始化，如未登录请点击“重置”', 'info');
+      return;
+    }
+    $('gateStatus').classList.remove('hidden');
+    $('gateLoginBtn').disabled = true;
+    $('gateLoginBtn').classList.add('opacity-60', 'cursor-not-allowed');
+
+    // Allow the login popup to be raised again.
+    try { window.localStorage.removeItem('connectPopupManager::connect::loginPopup'); } catch (e) { /* ignore */ }
+
+    try {
+      connect.core.initCCP($('ccpMount'), {
+        ccpUrl: state.cfg.ccpUrl,
+        loginUrl: state.cfg.loginUrl || undefined,
+        loginPopup: true,
+        loginPopupAutoClose: true,
+        // Center the CCP login popup on screen instead of pinning it top-left.
+        loginOptions: Object.assign({ autoClose: true }, centeredPopupBox(480, 640)),
+        region: state.cfg.region,
+        softphone: { allowFramedSoftphone: true, disableRingtone: false, allowFramedVideoCall: true },
+        pageOptions: { enableAudioDeviceSettings: true, enablePhoneTypeSettings: true },
+        ccpAckTimeout: 5000, ccpSynTimeout: 3000, ccpLoadTimeout: 10000
+      });
+      state.ccpInitialized = true;
+      log('connect.core.initCCP called → ' + state.cfg.ccpUrl);
+    } catch (err) {
+      log('initCCP error: ' + err);
+      toast('CCP 初始化失败：' + err, 'err');
+      $('gateLoginBtn').disabled = false;
+      $('gateLoginBtn').classList.remove('opacity-60', 'cursor-not-allowed');
+      return;
+    }
+
+    connect.agent(onAgentReady);
+    connect.contact(subscribeContactEvents);
+
+    if (connect.core.onAuthFail) {
+      connect.core.onAuthFail(() => {
+        log('onAuthFail: session expired / agent signed out');
+        if (state.loggingOut) return;                 // our own logout, page is reloading
+        lockCrm('座席已退出登录或会话已过期，请重新登录 CCP。');
+      });
+    }
+    if (connect.core.onAccessDenied) {
+      connect.core.onAccessDenied(() => log('onAccessDenied'));
+    }
+  }
+
+  /** Re-lock the CRM behind the gate (agent signed out inside the CCP, or session expired). */
+  function lockCrm(reason) {
+    state.agent = null;
+    closeCcp();
+    $('ccpFab').classList.add('hidden');
+    $('logoutBtn').classList.add('hidden');
+    $('logoutBtn').classList.remove('flex');
+    $('agentName').textContent = '未登录座席';
+    $('agentRouting').textContent = '-';
+    $('agentAvatar').textContent = '--';
+    $('agentStateSelect').disabled = true;
+    $('loginGate').classList.remove('hidden');
+    $('gateStatus').classList.remove('hidden');
+    $('gateStatusText').textContent = reason || '请重新登录 CCP。';
+    const btn = $('gateLoginBtn');
+    btn.disabled = false;
+    btn.classList.remove('opacity-60', 'cursor-not-allowed');
+    btn.textContent = '重新登录 CCP';
+    btn.setAttribute('onclick', 'resetCcpSession()');
+  }
+
+  function resetCcpSession() {
+    try { window.localStorage.removeItem('connectPopupManager::connect::loginPopup'); } catch (e) { /* ignore */ }
+    try { if (state.ccpInitialized) connect.core.terminate(); } catch (e) { /* ignore */ }
+    location.reload();
+  }
+
+  /* ==========================================================================
+     2) AGENT — unlock CRM, show CCP icon
+     ========================================================================== */
+
+  function onAgentReady(agent) {
+    state.agent = agent;
+    log('agent ready: ' + agent.getName());
+
+    // Unlock the CRM
+    $('loginGate').classList.add('hidden');
+    $('ccpFab').classList.remove('hidden');
+    $('logoutBtn').classList.remove('hidden');
+    $('logoutBtn').classList.add('flex');
+    toast('CCP 登录成功，欢迎 ' + agent.getName(), 'ok');
+
+    $('agentName').textContent = agent.getName();
+    $('agentAvatar').textContent = initials(agent.getName() || '座席');
+    try { $('agentRouting').textContent = agent.getRoutingProfile().name; } catch (e) { /* ignore */ }
+
+    loadAgentStates(agent);
+    agent.onStateChange(sc => {
+      log('agent state → ' + sc.newState);
+      syncAgentStateUI(sc.newState);
+    });
+    agent.onRefresh(a => {
+      const st = a.getState() && a.getState().name;
+      if (st) syncAgentStateUI(st);
+    });
+  }
+
+  function loadAgentStates(agent) {
+    const sel = $('agentStateSelect');
+    try {
+      const states = (agent.getAgentStates() || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+      state.agentStates = states;
+      sel.innerHTML = '';
+      states.forEach((s, i) => {
+        const o = document.createElement('option');
+        o.value = String(i); o.textContent = s.name;
+        sel.appendChild(o);
+      });
+      sel.disabled = false;
+      syncAgentStateUI(agent.getState().name);
+    } catch (e) { log('loadAgentStates error: ' + e); }
+  }
+
+  function syncAgentStateUI(name) {
+    const sel = $('agentStateSelect');
+    Array.from(sel.options).forEach(o => { o.selected = (o.textContent === name); });
+    if (!Array.from(sel.options).some(o => o.textContent === name)) {
+      const o = document.createElement('option');
+      o.textContent = name; o.selected = true; o.value = '-1';
+      sel.appendChild(o);
+    }
+    const lower = (name || '').toLowerCase();
+    const dot = $('agentDot');
+    dot.className = 'w-2 h-2 rounded-full ' +
+      (lower === 'available' || lower === 'routable' ? 'bg-emerald-500'
+        : lower === 'offline' ? 'bg-slate-300' : 'bg-amber-400');
+  }
+
+  function onAgentStateChange() {
+    const sel = $('agentStateSelect');
+    const idx = Number(sel.value);
+    if (!state.agent || isNaN(idx) || idx < 0) return;
+    const target = state.agentStates[idx];
+    if (!target) return;
+    state.agent.setState(target, {
+      success: () => log('setState ok → ' + target.name),
+      failure: e => { log('setState failed: ' + e); toast('切换状态失败', 'err'); }
+    });
+  }
+
+  /* ---------- agent logout ---------- */
+
+  /**
+   * Sign the agent out:
+   *   1. set the agent Offline so Connect stops routing to them
+   *   2. hit <instance>/connect/logout to drop the Connect session cookie
+   *   3. connect.core.terminate() to tear down the CCP iframe
+   *   4. reload so the CRM is locked behind the login gate again
+   */
+  function logoutAgent() {
+    if (state.loggingOut) return;
+    const active = Object.keys(state.activeContacts).length;
+    const msg = active > 0
+      ? `当前仍有 ${active} 个活动联系，退出登录会中断处理。确认退出？`
+      : '确认退出座席登录？退出后需要重新登录 CCP 才能使用 CRM。';
+    if (!window.confirm(msg)) return;
+
+    state.loggingOut = true;
+    const btn = $('logoutBtn');
+    btn.disabled = true;
+    btn.classList.add('opacity-60', 'cursor-not-allowed');
+    btn.querySelector('span').textContent = '退出中…';
+    log('logout requested');
+
+    setAgentOffline(() => {
+      callLogoutEndpoint(() => {
+        try { connect.core.terminate(); log('connect.core.terminate() done'); } catch (e) { log('terminate error: ' + e); }
+        try { window.localStorage.removeItem('connectPopupManager::connect::loginPopup'); } catch (e) { /* ignore */ }
+        state.agent = null;
+        toast('已退出座席登录，正在返回登录页…', 'ok');
+        setTimeout(() => location.reload(), 700);
+      });
+    });
+  }
+
+  function setAgentOffline(done) {
+    const offline = (state.agentStates || []).find(s => /^offline$/i.test(s.name));
+    if (!state.agent || !offline) { done(); return; }
+    let finished = false;
+    const once = () => { if (!finished) { finished = true; done(); } };
+    setTimeout(once, 1500);           // don't block logout on a slow API
+    try {
+      state.agent.setState(offline, {
+        success: () => { log('agent set to Offline before logout'); once(); },
+        failure: e => { log('setState(Offline) failed: ' + e); once(); }
+      });
+    } catch (e) { log('setState(Offline) threw: ' + e); once(); }
+  }
+
+  function callLogoutEndpoint(done) {
+    let origin = '';
+    try { origin = new URL(state.cfg.ccpUrl).origin; } catch (e) { /* ignore */ }
+    if (!origin) { done(); return; }
+    const logoutUrl = origin + '/connect/logout';
+    log('GET ' + logoutUrl);
+
+    let finished = false;
+    const once = () => { if (!finished) { finished = true; done(); } };
+    setTimeout(once, 2500);           // cap the wait
+
+    // The logout endpoint is cross-origin and returns no CORS headers, so the
+    // response is opaque — we only need the request (with cookies) to be sent.
+    fetch(logoutUrl, { method: 'GET', mode: 'no-cors', credentials: 'include', cache: 'no-store' })
+      .then(() => { log('logout endpoint called'); once(); })
+      .catch(err => {
+        log('fetch logout failed (' + err + '), falling back to iframe');
+        const f = document.createElement('iframe');
+        f.style.display = 'none';
+        f.src = logoutUrl;
+        f.onload = once;
+        document.body.appendChild(f);
+      });
+  }
+
+  /* ---------- CCP panel show / hide (iframe never unmounted) ---------- */
+
+  function isCcpOpen() { return !$('ccpPanel').classList.contains('ccp-collapsed'); }
+
+  /**
+   * Docked mode keeps the CCP out of the way of the ticket / profile: the panel
+   * stays a fixed right rail and <main> gets a matching right margin, so the
+   * grid reflows instead of being covered. Below CCP_DOCK_MIN_WIDTH there isn't
+   * enough room for three columns, so we fall back to the floating panel.
+   */
+  function applyCcpLayout() {
+    const panel = $('ccpPanel');
+    const canDock = window.innerWidth >= CCP_DOCK_MIN_WIDTH;
+    const docked = state.ccpDocked && canDock;
+
+    if (docked) {
+      // A previous drag leaves inline left/top behind — clear it or the two
+      // positioning models fight each other.
+      panel.style.left = ''; panel.style.top = '';
+      panel.style.right = ''; panel.style.bottom = ''; panel.style.width = '';
+    }
+    document.body.classList.toggle('ccp-docked', docked && isCcpOpen());
+
+    const btn = $('ccpDockBtn');
+    btn.classList.toggle('bg-white/25', docked);
+    btn.classList.toggle('opacity-40', !canDock);
+    btn.title = !canDock ? '窗口过窄，暂不支持停靠'
+      : docked ? '当前：停靠右侧（内容自动让位）· 点击改为悬浮'
+               : '当前：悬浮窗口 · 点击停靠到右侧';
+  }
+
+  function toggleCcpDock() {
+    if (window.innerWidth < CCP_DOCK_MIN_WIDTH) {
+      toast('窗口宽度不足 ' + CCP_DOCK_MIN_WIDTH + 'px，停靠模式已禁用', 'info');
+      return;
+    }
+    state.ccpDocked = !state.ccpDocked;
+    try { localStorage.setItem(DOCK_KEY, state.ccpDocked ? '1' : '0'); } catch (e) { /* ignore */ }
+    applyCcpLayout();
+  }
+
+  function openCcp() {
+    $('ccpPanel').classList.remove('ccp-collapsed');
+    $('fabBadge').classList.add('hidden');
+    $('ccpFab').classList.remove('fab-ring', 'bg-emerald-500', 'hover:bg-emerald-600');
+    $('ccpFab').classList.add('bg-brand-600', 'hover:bg-brand-700');
+    applyCcpLayout();
+  }
+  function closeCcp() {
+    $('ccpPanel').classList.add('ccp-collapsed');
+    applyCcpLayout();
+  }
+  function toggleCcp() {
+    if ($('ccpPanel').classList.contains('ccp-collapsed')) openCcp(); else closeCcp();
+  }
+
+  window.addEventListener('resize', applyCcpLayout);
+  function alertFab(count) {
+    const fab = $('ccpFab'), badge = $('fabBadge');
+    if (count > 0) {
+      fab.classList.add('fab-ring', 'bg-emerald-500', 'hover:bg-emerald-600');
+      fab.classList.remove('bg-brand-600', 'hover:bg-brand-700');
+      badge.textContent = String(count);
+      badge.classList.remove('hidden');
+    } else {
+      fab.classList.remove('fab-ring', 'bg-emerald-500', 'hover:bg-emerald-600');
+      fab.classList.add('bg-brand-600', 'hover:bg-brand-700');
+      badge.classList.add('hidden');
+    }
+  }
+
+  // Drag the CCP panel by its header
+  (function makeDraggable() {
+    const panel = $('ccpPanel'), handle = $('ccpHeader');
+    let dx = 0, dy = 0, dragging = false;
+    handle.addEventListener('mousedown', e => {
+      if (e.target.closest('button')) return;
+      // Freeze the current on-screen position first, then leave docked mode, so
+      // the panel doesn't jump before the drag starts.
+      const r = panel.getBoundingClientRect();
+      panel.style.width = r.width + 'px';
+      panel.style.left = r.left + 'px'; panel.style.top = r.top + 'px';
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
+      if (state.ccpDocked) {
+        state.ccpDocked = false;
+        try { localStorage.setItem(DOCK_KEY, '0'); } catch (err) { /* ignore */ }
+        document.body.classList.remove('ccp-docked');
+        applyCcpLayout();
+      }
+      dx = e.clientX - r.left; dy = e.clientY - r.top;
+      dragging = true;
+      document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      panel.style.left = Math.max(8, Math.min(window.innerWidth - 120, e.clientX - dx)) + 'px';
+      panel.style.top = Math.max(8, Math.min(window.innerHeight - 60, e.clientY - dy)) + 'px';
+    });
+    document.addEventListener('mouseup', () => { dragging = false; document.body.style.userSelect = ''; });
+  })();
+
+  /* ==========================================================================
+     3) CONTACT EVENTS — screen pop + auto ticket
+     ========================================================================== */
+
+  function subscribeContactEvents(contact) {
+    const id = contact.getContactId();
+    const type = contact.getType();
+    log(`connect.contact: ${type} ${id}`);
+
+    contact.onIncoming(c => handleIncoming(c, 'onIncoming'));
+    contact.onConnecting(c => handleIncoming(c, 'onConnecting'));
+    contact.onAccepted(() => log('onAccepted ' + id));
+
+    contact.onConnected(c => {
+      log('onConnected ' + id);
+      const rec = state.activeContacts[id];
+      if (rec) {
+        rec.connectedAt = Date.now();
+        updateScreenPop(rec, '通话中');
+      }
+      updateTicketField(id, 'status', '进行中');
+    });
+
+    contact.onMissed(() => { log('onMissed ' + id); finishContact(id, '未接'); });
+    contact.onACW(() => {
+      log('onACW ' + id);
+      const rec = state.activeContacts[id];
+      if (rec) updateScreenPop(rec, '通话后工作 (ACW)');
+      toast('进入 ACW，请补充工单信息后提交', 'info');
+    });
+    contact.onEnded(() => { log('onEnded ' + id); finishContact(id, '已结束'); });
+    contact.onDestroy(() => { log('onDestroy ' + id); finishContact(id, '已结束'); });
+  }
+
+  function handleIncoming(contact, source) {
+    const id = contact.getContactId();
+    if (state.activeContacts[id]) return;               // already handled
+    const type = contact.getType();
+    const inbound = isInbound(contact);
+    const attrs = safeAttrs(contact);
+    const phone = customerPhoneOf(contact);
+    const queue = safeQueue(contact);
+
+    const customer = resolveCustomer({ attrs, phone, outboundHint: inbound ? null : state.pendingOutbound });
+    if (!inbound) state.pendingOutbound = null;
+
+    const rec = {
+      contactId: id,
+      type: type === connect.ContactType.CHAT ? 'CHAT' : (type === connect.ContactType.VOICE ? 'VOICE' : String(type).toUpperCase()),
+      inbound, phone, queue,
+      customerId: customer.id,
+      startedAt: Date.now(),
+      ticketId: null
+    };
+    state.activeContacts[id] = rec;
+    log(`${source}: ${rec.type} ${inbound ? 'INBOUND' : 'OUTBOUND'} ${phone || '(no ANI)'} → ${customer.name}`);
+
+    // 2) auto-popup the CCP so the agent can answer voice / chat
+    openCcp();
+    alertFab(Object.keys(state.activeContacts).length);
+    updateCcpBadge();
+
+    // 3) screen pop the customer profile
+    selectCustomer(customer.id, { fromContact: true });
+    showScreenPop(rec);
+
+    // 3) auto-create a dummy ticket for the agent to fill in
+    if (inbound) {
+      const ticket = createTicket(customer.id, rec);
+      rec.ticketId = ticket.id;
+      renderTicketPane();
+      toast(`已自动创建工单 ${ticket.id}，请补充信息`, 'ok');
+    } else {
+      renderTicketPane();
+    }
+  }
+
+  function finishContact(id, resultLabel) {
+    const rec = state.activeContacts[id];
+    if (!rec) return;
+    delete state.activeContacts[id];
+
+    const secs = Math.max(1, Math.round((Date.now() - (rec.connectedAt || rec.startedAt)) / 1000));
+    const dur = `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
+
+    addHistory(rec.customerId, {
+      channel: rec.type,
+      at: nowStr(new Date(rec.startedAt)),
+      subject: (rec.inbound ? '进线' : '外呼') + '·' + (rec.type === 'CHAT' ? 'Chat 会话' : '语音通话'),
+      summary: `联系 ID ${rec.contactId}${rec.queue ? ' · 队列 ' + rec.queue : ''}${rec.phone ? ' · ' + fmtPhone(rec.phone) : ''}`,
+      agent: (state.agent && state.agent.getName()) || '当前座席',
+      meta: rec.type === 'CHAT' ? 'Chat ' + dur : '时长 ' + dur,
+      status: resultLabel
+    });
+
+    if (rec.ticketId) updateTicketField(rec.contactId, 'duration', dur);
+
+    alertFab(Object.keys(state.activeContacts).length);
+    updateCcpBadge();
+    hideScreenPopIfIdle();
+    renderHistoryPane();
+    renderTicketPane();
+  }
+
+  function isInbound(contact) {
+    try { if (typeof contact.isInbound === 'function') return contact.isInbound(); } catch (e) { /* ignore */ }
+    try {
+      const conn = contact.getInitialConnection();
+      return conn.getType() === connect.ConnectionType.INBOUND;
+    } catch (e) { return true; }
+  }
+  function safeAttrs(contact) {
+    try { return contact.getAttributes() || {}; } catch (e) { return {}; }
+  }
+  function safeQueue(contact) {
+    try { const q = contact.getQueue(); return q ? q.name : ''; } catch (e) { return ''; }
+  }
+  function customerPhoneOf(contact) {
+    try {
+      const conns = contact.getConnections() || [];
+      for (const c of conns) {
+        const t = c.getType && c.getType();
+        if (t === connect.ConnectionType.AGENT) continue;
+        const ep = c.getEndpoint && c.getEndpoint();
+        if (ep && ep.phoneNumber) return ep.phoneNumber;
+        const addr = c.getAddress && c.getAddress();
+        if (addr && addr.phoneNumber) return addr.phoneNumber;
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      const ep = contact.getInitialConnection().getEndpoint();
+      if (ep && ep.phoneNumber) return ep.phoneNumber;
+    } catch (e) { /* ignore */ }
+    return '';
+  }
+
+  /**
+   * Resolve which CRM record the contact belongs to.
+   * Priority: contact attribute (customerId / customer_id) → attribute name →
+   * phone match → the customer we just click-to-called → deterministic fallback.
+   */
+  function resolveCustomer(ctx) {
+    const a = ctx.attrs || {};
+    const val = k => (a[k] && (a[k].value !== undefined ? a[k].value : a[k])) || '';
+
+    const byId = val('customerId') || val('customer_id') || val('crmId');
+    if (byId) {
+      const hit = CUSTOMERS.find(c => c.id.toLowerCase() === String(byId).toLowerCase());
+      if (hit) return hit;
+    }
+    const byName = val('customerName') || val('customer_name');
+    if (byName) {
+      const hit = CUSTOMERS.find(c => c.name === byName);
+      if (hit) return hit;
+    }
+    if (ctx.outboundHint) {
+      const hit = customerById(ctx.outboundHint);
+      if (hit) return hit;
+    }
+    if (ctx.phone) {
+      const digits = ctx.phone.replace(/\D/g, '');
+      const matches = CUSTOMERS.filter(c => c.phone.replace(/\D/g, '') === digits);
+      // All demo records share one number → pick a stable one per contact.
+      if (matches.length) return matches[hashPick(ctx.phone + (a.__seed || ''), matches.length)];
+    }
+    return CUSTOMERS[hashPick(String(Date.now()), CUSTOMERS.length)];
+  }
+  function hashPick(str, n) {
+    let x = 0;
+    for (let i = 0; i < str.length; i++) x = (x * 31 + str.charCodeAt(i)) % 100000;
+    return x % n;
+  }
+
+  /* ---------- screen pop banner ---------- */
+
+  function showScreenPop(rec) {
+    const pop = $('screenPop');
+    pop.classList.remove('hidden');
+    $('screenPopTitle').textContent = rec.inbound
+      ? (rec.type === 'CHAT' ? 'Chat 进线弹屏' : '来电弹屏')
+      : (rec.type === 'CHAT' ? 'Chat 外发' : '外呼通话');
+    updateScreenPop(rec, rec.inbound ? '振铃中' : '呼出中');
+    $('screenPopIcon').innerHTML = rec.type === 'CHAT'
+      ? '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.9 9.9 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>'
+      : '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>';
+
+    state.popStart = Date.now();
+    if (state.popTimer) clearInterval(state.popTimer);
+    state.popTimer = setInterval(() => {
+      const s = Math.floor((Date.now() - state.popStart) / 1000);
+      $('screenPopTimer').textContent =
+        `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+    }, 1000);
+    $('screenPopTimer').textContent = '00:00';
+  }
+
+  function updateScreenPop(rec, statusText) {
+    const cust = customerById(rec.customerId);
+    $('screenPopSub').textContent =
+      `${cust ? cust.name : '未知客户'} · ${fmtPhone(rec.phone) || 'Chat'} · ${rec.queue ? '队列 ' + rec.queue + ' · ' : ''}${statusText} · ${rec.contactId}`;
+  }
+
+  function hideScreenPopIfIdle() {
+    if (Object.keys(state.activeContacts).length > 0) return;
+    if (state.popTimer) { clearInterval(state.popTimer); state.popTimer = null; }
+    $('screenPop').classList.add('hidden');
+  }
+
+  function updateCcpBadge() {
+    const n = Object.keys(state.activeContacts).length;
+    const b = $('ccpContactBadge');
+    if (n > 0) { b.textContent = n + ' 个活动联系'; b.classList.remove('hidden'); }
+    else b.classList.add('hidden');
+  }
+
+  /* ==========================================================================
+     TICKETS
+     ========================================================================== */
+
+  function nextTicketId() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    const day = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+    const sameDay = state.store.tickets.filter(t => t.id.indexOf('TK-' + day) === 0).length;
+    return `TK-${day}-${String(sameDay + 1).padStart(3, '0')}`;
+  }
+
+  function createTicket(customerId, rec) {
+    const t = {
+      id: nextTicketId(),
+      customerId,
+      contactId: rec ? rec.contactId : '',
+      channel: rec ? rec.type : 'TICKET',
+      direction: rec ? (rec.inbound ? '进线' : '外呼') : '手工创建',
+      ani: rec ? rec.phone : '',
+      queue: rec ? rec.queue : '',
+      createdAt: nowStr(),
+      agent: (state.agent && state.agent.getName()) || '当前座席',
+      // agent-editable fields, pre-filled with dummy values
+      subject: rec ? ((rec.type === 'CHAT' ? 'Chat 咨询' : '来电咨询') + ' - 待座席补充') : '新建工单 - 待座席补充',
+      category: '',
+      priority: '中',
+      description: '',
+      resolution: '',
+      followUp: false,
+      status: '新建',
+      duration: ''
+    };
+    state.store.tickets.unshift(t);
+    saveStore();
+    return t;
+  }
+
+  function createManualTicket() {
+    if (!state.selectedId) { toast('请先选择一位客户', 'err'); return; }
+    const t = createTicket(state.selectedId, null);
+    renderTicketPane(t.id);
+    toast('已创建工单 ' + t.id, 'ok');
+  }
+
+  function ticketsOf(customerId) { return state.store.tickets.filter(t => t.customerId === customerId); }
+
+  function updateTicketField(contactId, field, value) {
+    const t = state.store.tickets.find(x => x.contactId === contactId);
+    if (!t) return;
+    t[field] = value;
+    saveStore();
+    renderTicketPane(t.id);
+  }
+
+  function onTicketInput(ticketId, field, el) {
+    const t = state.store.tickets.find(x => x.id === ticketId);
+    if (!t) return;
+    t[field] = (el.type === 'checkbox') ? el.checked : el.value;
+    saveStore();
+  }
+
+  function submitTicket(ticketId) {
+    const t = state.store.tickets.find(x => x.id === ticketId);
+    if (!t) return;
+    if (!t.subject.trim()) { toast('请填写工单主题', 'err'); return; }
+    if (!t.category) { toast('请选择工单分类', 'err'); return; }
+    t.status = t.followUp ? '待跟进' : '已解决';
+    t.closedAt = nowStr();
+    saveStore();
+    addHistory(t.customerId, {
+      channel: 'TICKET',
+      at: t.closedAt,
+      subject: `${t.id} ${t.subject}`,
+      summary: `${t.category} · 优先级 ${t.priority}${t.description ? ' · ' + t.description : ''}${t.resolution ? ' · 处理：' + t.resolution : ''}`,
+      agent: t.agent,
+      meta: t.channel + (t.duration ? ' ' + t.duration : ''),
+      status: t.status
+    });
+    renderTicketPane(t.id);
+    renderHistoryPane();
+    toast(`工单 ${t.id} 已提交（${t.status}）`, 'ok');
+  }
+
+  /* ==========================================================================
+     HISTORY
+     ========================================================================== */
+
+  function addHistory(customerId, entry) {
+    if (!state.store.history[customerId]) state.store.history[customerId] = [];
+    state.store.history[customerId].unshift(entry);
+    saveStore();
+  }
+
+  function historyOf(customerId) {
+    const seeded = SEED_HISTORY[customerId] || [];
+    const added = state.store.history[customerId] || [];
+    return added.concat(seeded).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  }
+
+  /* ==========================================================================
+     4) CUSTOMER DIRECTORY + CLICK-TO-CALL
+     ========================================================================== */
+
+  function renderCustomerList() {
+    const q = $('searchInput').value.trim().toLowerCase();
+    const list = CUSTOMERS.filter(c => {
+      if (!q) return true;
+      // 姓名检索为主，同时兼容编号 / 手机 / 邮箱 / 公司
+      return c.name.toLowerCase().includes(q)
+        || c.id.toLowerCase().includes(q)
+        || c.phone.replace(/\D/g, '').includes(q.replace(/\D/g, '') || '\u0000')
+        || c.email.toLowerCase().includes(q)
+        || c.company.toLowerCase().includes(q);
+    });
+
+    $('custCount').textContent = String(list.length);
+    $('emptyList').classList.toggle('hidden', list.length > 0);
+
+    $('customerList').innerHTML = list.map(c => `
+      <div class="cust-row ${c.id === state.selectedId ? 'selected' : ''} border-l-2 border-transparent px-4 py-3 hover:bg-slate-50 cursor-pointer flex items-start gap-3"
+           onclick="selectCustomer('${c.id}')">
+        <div class="w-9 h-9 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-xs font-semibold shrink-0">${esc(initials(c.name))}</div>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <span class="text-sm font-medium truncate">${esc(c.name)}</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded border ${tierStyle(c.tier)}">${esc(c.tier)}</span>
+          </div>
+          <div class="text-[11px] text-ink-400 truncate">${esc(c.id)} · ${esc(c.company)}</div>
+          <button onclick="event.stopPropagation(); clickToCall('${c.phone}','${c.id}')"
+                  title="点击外呼 ${esc(fmtPhone(c.phone))}"
+                  class="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1 hover:bg-emerald-100">
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+            ${esc(fmtPhone(c.phone))}
+          </button>
+        </div>
+      </div>`).join('');
+  }
+
+  function selectCustomer(id, opts) {
+    state.selectedId = id;
+    renderCustomerList();
+    renderProfile();
+    renderTicketPane();
+    renderHistoryPane();
+    if (opts && opts.fromContact) window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function renderProfile() {
+    const c = customerById(state.selectedId);
+    if (!c) return;
+    const activeRec = Object.values(state.activeContacts).find(r => r.customerId === c.id);
+    $('profileCard').innerHTML = `
+      <div class="flex items-start gap-4">
+        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-brand-500 to-violet-500 text-white flex items-center justify-center text-lg font-semibold shrink-0">${esc(initials(c.name))}</div>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h2 class="text-lg font-semibold">${esc(c.name)}</h2>
+            <span class="text-[11px] px-2 py-0.5 rounded border ${tierStyle(c.tier)}">${esc(c.tier)} 客户</span>
+            ${activeRec ? `<span class="text-[11px] px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 border border-emerald-200">${activeRec.type === 'CHAT' ? 'Chat 中' : '通话中'}</span>` : ''}
+          </div>
+          <div class="text-xs text-ink-400 mt-0.5">${esc(c.id)} · ${esc(c.company)} · ${esc(c.city)}</div>
+        </div>
+        <button onclick="clickToCall('${c.phone}','${c.id}')"
+                class="shrink-0 inline-flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-medium px-3.5 py-2.5 rounded-xl">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+          呼叫客户
+        </button>
+      </div>
+
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5">
+        ${field('手机（点击外呼）', `<button onclick="clickToCall('${c.phone}','${c.id}')" class="text-emerald-700 hover:underline font-medium">${esc(fmtPhone(c.phone))}</button>`)}
+        ${field('邮箱', esc(c.email))}
+        ${field('性别', esc(c.gender))}
+        ${field('注册时间', esc(c.since))}
+        ${field('所在城市', esc(c.city))}
+        ${field('订阅产品', esc(c.product))}
+        ${field('账户余额', '¥ ' + c.balance.toFixed(2))}
+        ${field('工单总数', String(ticketsOf(c.id).length))}
+      </div>
+      <div class="mt-3">${field('联系地址', esc(c.address))}</div>`;
+  }
+
+  function field(label, valueHtml) {
+    return `<div class="bg-slate-50 border border-slate-100 rounded-xl px-3 py-2.5">
+        <div class="text-[10px] text-ink-400 mb-0.5">${esc(label)}</div>
+        <div class="text-xs text-ink-700 break-all">${valueHtml}</div>
+      </div>`;
+  }
+
+  function renderTicketPane(focusId) {
+    const pane = $('ticketPane');
+    if (!state.selectedId) { pane.innerHTML = `<div class="text-xs text-ink-400">尚未选择客户。</div>`; return; }
+    const tickets = ticketsOf(state.selectedId);
+    if (!tickets.length) {
+      pane.innerHTML = `<div class="text-xs text-ink-400">该客户暂无工单。来电 / Chat 进线时会自动创建，也可点击“新建工单”。</div>`;
+      return;
+    }
+    const t = tickets.find(x => x.id === focusId) || tickets[0];
+    const statusCls = t.status === '已解决' ? 'bg-emerald-100 text-emerald-700'
+      : t.status === '待跟进' ? 'bg-amber-100 text-amber-700'
+      : t.status === '进行中' ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-ink-500';
+
+    pane.innerHTML = `
+      <div class="flex items-center gap-2 flex-wrap mb-3">
+        <span class="text-sm font-mono font-semibold">${esc(t.id)}</span>
+        <span class="text-[11px] px-2 py-0.5 rounded ${statusCls}">${esc(t.status)}</span>
+        <span class="text-[11px] px-2 py-0.5 rounded ${channelMeta(t.channel).cls}">${esc(channelMeta(t.channel).label)} · ${esc(t.direction)}</span>
+        ${tickets.length > 1 ? `<select onchange="renderTicketPane(this.value)" class="ml-auto text-[11px] border border-slate-200 rounded-lg px-2 py-1 outline-none">
+            ${tickets.map(x => `<option value="${esc(x.id)}" ${x.id === t.id ? 'selected' : ''}>${esc(x.id)} · ${esc(x.status)}</option>`).join('')}
+          </select>` : ''}
+      </div>
+
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        ${field('创建时间', esc(t.createdAt))}
+        ${field('受理座席', esc(t.agent))}
+        ${field('联系 ID', esc(t.contactId || '-'))}
+        ${field('来源号码 / 队列', esc((t.ani ? fmtPhone(t.ani) : '-') + (t.queue ? ' · ' + t.queue : '')))}
+      </div>
+
+      <div class="space-y-3">
+        <div>
+          <label class="block text-[11px] text-ink-500 mb-1">主题 <span class="text-rose-500">*</span></label>
+          <input type="text" value="${esc(t.subject)}" oninput="onTicketInput('${t.id}','subject',this)"
+            class="w-full text-xs border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100" />
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-[11px] text-ink-500 mb-1">分类 <span class="text-rose-500">*</span></label>
+            <select onchange="onTicketInput('${t.id}','category',this)"
+              class="w-full text-xs border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-brand-500">
+              ${['', '账单与发票', '产品咨询', '技术故障', '投诉建议', '退款退货', '账号安全', '其他']
+                .map(o => `<option value="${esc(o)}" ${o === t.category ? 'selected' : ''}>${o ? esc(o) : '请选择…'}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] text-ink-500 mb-1">优先级</label>
+            <select onchange="onTicketInput('${t.id}','priority',this)"
+              class="w-full text-xs border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-brand-500">
+              ${['低', '中', '高', '紧急'].map(o => `<option ${o === t.priority ? 'selected' : ''}>${o}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-[11px] text-ink-500 mb-1">客户诉求 / 通话摘要</label>
+          <textarea rows="3" oninput="onTicketInput('${t.id}','description',this)"
+            placeholder="请记录客户描述的问题…"
+            class="w-full text-xs border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100">${esc(t.description)}</textarea>
+        </div>
+        <div>
+          <label class="block text-[11px] text-ink-500 mb-1">处理结果</label>
+          <textarea rows="2" oninput="onTicketInput('${t.id}','resolution',this)"
+            placeholder="请记录处理方案…"
+            class="w-full text-xs border border-slate-200 rounded-lg px-3 py-2 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100">${esc(t.resolution)}</textarea>
+        </div>
+        <label class="flex items-center gap-2 text-[11px] text-ink-500">
+          <input type="checkbox" ${t.followUp ? 'checked' : ''} onchange="onTicketInput('${t.id}','followUp',this)"
+            class="rounded border-slate-300 text-brand-600" />
+          需要回访跟进
+        </label>
+        <button onclick="submitTicket('${t.id}')"
+          class="w-full bg-brand-600 hover:bg-brand-700 text-white text-xs font-medium py-2.5 rounded-lg transition">
+          提交工单
+        </button>
+      </div>`;
+  }
+
+  function renderHistoryPane() {
+    const pane = $('historyPane');
+    if (!state.selectedId) { pane.innerHTML = `<div class="text-xs text-ink-400">尚未选择客户。</div>`; return; }
+    const items = historyOf(state.selectedId);
+    if (!items.length) { pane.innerHTML = `<div class="text-xs text-ink-400">暂无来往记录。</div>`; return; }
+    pane.innerHTML = `<div class="relative timeline pl-10 space-y-4">
+      ${items.map(it => {
+        const m = channelMeta(it.channel);
+        return `<div class="relative">
+          <div class="absolute -left-10 top-0 w-8 h-8 rounded-full ${m.cls} flex items-center justify-center text-[10px] font-medium border-2 border-white">${esc(m.label)}</div>
+          <div class="bg-slate-50 border border-slate-100 rounded-xl px-3 py-2.5">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-xs font-medium">${esc(it.subject)}</span>
+              ${it.status ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-white border border-slate-200 text-ink-500">${esc(it.status)}</span>` : ''}
+              <span class="ml-auto text-[10px] text-ink-400">${esc(it.at)}</span>
+            </div>
+            <div class="text-[11px] text-ink-500 mt-1 leading-relaxed break-all">${esc(it.summary)}</div>
+            <div class="text-[10px] text-ink-400 mt-1.5">座席 ${esc(it.agent)}${it.meta && it.meta !== '-' ? ' · ' + esc(it.meta) : ''}</div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+  }
+
+  /* ---------- click-to-call ---------- */
+
+  function clickToCall(phone, customerId) {
+    if (!state.agent) { toast('请先登录 CCP', 'err'); return; }
+    const cust = customerById(customerId);
+    state.pendingOutbound = customerId;
+    selectCustomer(customerId);
+    openCcp();
+
+    try {
+      const endpoint = connect.Endpoint.byPhoneNumber(phone);
+      state.agent.connect(endpoint, {
+        success: () => {
+          log('agent.connect success → ' + phone);
+          toast(`正在呼叫 ${cust ? cust.name : ''} ${fmtPhone(phone)}`, 'ok');
+        },
+        failure: err => {
+          log('agent.connect failure: ' + err);
+          state.pendingOutbound = null;
+          toast('外呼失败，请确认座席状态为 Available 且号码可外呼', 'err');
+        }
+      });
+    } catch (e) {
+      log('agent.connect threw: ' + e);
+      state.pendingOutbound = null;
+      toast('外呼异常：' + e, 'err');
+    }
+  }
+
+  /* ==========================================================================
+     DEMO — simulate an inbound voice / chat contact without a real Connect call
+     ========================================================================== */
+
+  function simulateMenu() {
+    const kind = window.prompt('模拟进线（仅用于演示弹屏 / 工单流程）：\n输入 1 = 语音来电\n输入 2 = Chat 进线', '1');
+    if (kind !== '1' && kind !== '2') return;
+    const cust = CUSTOMERS[Math.floor(Math.random() * CUSTOMERS.length)];
+    const id = 'sim-' + Math.random().toString(36).slice(2, 10);
+    const rec = {
+      contactId: id,
+      type: kind === '1' ? 'VOICE' : 'CHAT',
+      inbound: true,
+      phone: kind === '1' ? outboundNumber() : '',
+      queue: kind === '1' ? 'BasicQueue' : 'ChatQueue',
+      customerId: cust.id,
+      startedAt: Date.now(),
+      connectedAt: Date.now(),
+      ticketId: null
+    };
+    state.activeContacts[id] = rec;
+    openCcp();
+    alertFab(Object.keys(state.activeContacts).length);
+    updateCcpBadge();
+    selectCustomer(cust.id, { fromContact: true });
+    showScreenPop(rec);
+    const t = createTicket(cust.id, rec);
+    rec.ticketId = t.id;
+    renderTicketPane(t.id);
+    log(`[SIM] ${rec.type} inbound → ${cust.name}`);
+    toast(`模拟${rec.type === 'CHAT' ? ' Chat ' : '来电'}：${cust.name}，工单 ${t.id} 已创建`, 'ok');
+    window.__endSim = () => finishContact(id, '已结束');
+    setTimeout(() => { if (state.activeContacts[id]) finishContact(id, '已结束'); }, 120000);
+  }
+
+  /* ==========================================================================
+     BOOT
+     ========================================================================== */
+
+  (function boot() {
+    $('cfgInstanceUrl').value = state.cfg.ccpUrl;
+    $('cfgRegion').value = state.cfg.region;
+    $('cfgLoginUrl').value = state.cfg.loginUrl;
+    $('cfgOutboundNumber').value = state.cfg.outboundNumber || DEFAULT_OUTBOUND_NUMBER;
+
+    applyCcpLayout();
+    renderCustomerList();
+    renderTicketPane();
+    renderHistoryPane();
+
+    // Requirement 1: opening the CRM asks for CCP login. If the instance is
+    // already configured, kick off initCCP right away so the login popup shows.
+    if (localStorage.getItem(CFG_KEY)) initCcp();
+  })();
+  </script>
+</body>
+
+</html>
